@@ -1,19 +1,10 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-@date:    20131001
-@version: 0.2
-@author:  wklken@yeah.net
-@desc:    搜索下拉提示，基于后台提供数据，建立数据结构(前缀树)，用户输入query前缀时，可以提示对应query前缀补全
-
-@update:
-    20131001 基本结构，新增，搜索等基本功能
-    20131005 增加缓存功能，当缓存打开，用户搜索某个前缀超过一定次数时，进行缓存，减少搜索时间
-    20140309 修改代码，降低内存占用
-
-@TODO:
-    test case
-    加入拼音的话，导致内存占用翻倍增长，要考虑下如何优化节点，共用内存
+@from:https://github.com/wklken/suggestion
+@2nd-developer : a6535234@gmail.com
+@Done:
+    1.support middle search
 
 """
 #这是实现cache的一种方式，也可以使用redis/memcached在外部做缓存
@@ -34,17 +25,18 @@ CACHED_THREHOLD = 10
 ############### start ######################
 
 class Node(dict):
-    def __init__(self, key, is_leaf=False, weight=0, kwargs=None):
+    def __init__(self, key, is_leaf=False, weight=0, parent = None, kwargs=None):
         """
         @param key: 节点字符
         @param is_leaf: 是否叶子节点
         @param weight: 节点权重, 某个词最后一个字节点代表其权重，其余中间节点权重为0，无意义
         @param kwargs: 可传入其他任意参数，用于某些特殊用途
+        # 2017/10/27 add parent in Node  , used for middle search
         """
         self.key = key
         self.is_leaf = is_leaf
         self.weight = weight
-
+        self.parent = parent
         #缓存,存的是node指针
         self.cache = []
         #节点前缀搜索次数，可以用于搜索query数据分析
@@ -91,17 +83,32 @@ class Node(dict):
     def get_top_node(self, prefix):
         """
         获取一个前缀的最后一个节点(补全所有后缀的顶部节点)
-
+        #2017/10/27 增加字符串中间查询
         :param prefix: 字符转前缀
-        :return: Node对象
+        :return: Node对象列表
         """
+        def get_top(node, prefix):
+            for k in prefix:
+                node = node.get_subnode(k)
+                if node is None:
+                    return None
+            return node
         top = self
+        top_list=[]
+        queue = []
+        if top.has_subnode():
+            queue.append(top)
+            while queue:#广度优先获得所有符合条件的top node
+                k = queue.pop()
+                for sub_key in k.iterkeys():
+                    if sub_key == prefix[0]:
+                        result = get_top(k, prefix)
+                        if isinstance(result, Node):
+                            top_list.append(result)
+                    queue.append(k.get(sub_key))
+        return top_list
 
-        for k in prefix:
-            top = top.get_subnode(k)
-            if top is None:
-                return None
-        return top
+
 
 
 def depth_walk(node):
@@ -112,15 +119,15 @@ def depth_walk(node):
     """
     result = []
     if node.is_leaf:
-        result.append(('', node))
+        result.append(node)
 
     if node.has_subnode():
         for k in node.iterkeys():
             s = depth_walk(node.get(k))
-            result.extend([(k + subkey, snode) for subkey, snode in s])
+            result.extend([snode for snode in s])
         return result
     else:
-        return [('', node)]
+        return [node]
 
 
 def search(node, prefix, limit=None, is_case_sensitive=False):
@@ -136,24 +143,34 @@ def search(node, prefix, limit=None, is_case_sensitive=False):
     if not is_case_sensitive:
         prefix = prefix.lower()
 
-    node = node.get_top_node(prefix)
+    node_list = node.get_top_node(prefix)
 
     #如果找不到前缀节点，代表匹配失败，返回空
-    if node is None:
+    if node_list is None:
         return []
 
     #搜索次数递增
-    node.search_count += 1
+    for node in node_list:
+        node.search_count += 1
+    result=[]
+    for node in node_list:
+        if CACHED and node.cache:
+            result.extend(node.cache[:limit] if limit is not None else node.cache)
+    def get_search_result(node):
+        result = node.key
+        parent = node.parent
+        while parent:
+            result = parent.key+result
+            parent = parent.parent
+        return (result, node)
 
-    if CACHED and node.cache:
-        return node.cache[:limit] if limit is not None else node.cache
-
-    result = [(prefix + subkey, pnode) for subkey, pnode in depth_walk(node)]
+    for node in node_list:
+        result.extend(map(get_search_result, depth_walk(node)))
 
     result.sort(key=lambda x: x[1].weight, reverse=True)
-
-    if CACHED and node.search_count >= CACHED_THREHOLD:
-        node.cache = result[:CACHED_SIZE]
+    for node in node_list:
+        if CACHED and node.search_count >= CACHED_THREHOLD:
+            node.cache = result[:CACHED_SIZE]
 
     return result[:limit] if limit is not None else result
 
@@ -174,9 +191,9 @@ def add(node, keyword, weight=0, **kwargs):
     for c in keyword:
         if c not in one_node:
             if index != last_index:
-                one_node.add_subnode(Node(c, weight=weight))
+                one_node.add_subnode(Node(c, weight=weight, parent=one_node))
             else:
-                one_node.add_subnode(Node(c, is_leaf=True, weight=weight, kwargs=kwargs))
+                one_node.add_subnode(Node(c, is_leaf=True, weight=weight,parent=one_node,  kwargs=kwargs))
             one_node = one_node.get_subnode(c)
         else:
             one_node = one_node.get_subnode(c)
@@ -233,7 +250,6 @@ def delete(node, keyword, judge_leaf=False):
         top_node = node.get_top_node(prefix)
         del top_node[this_node.key]
         delete(node, prefix, judge_leaf=True)
-
 
 ##############################
 #  增补功能 读数据文件建立树 #
