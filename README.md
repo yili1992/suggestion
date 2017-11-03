@@ -123,6 +123,8 @@ Result Len: 10
     2013-12-14 增加golang版本
     2014-05-11 增加double-array-trie实现的golang 版本
     2014-11-04 fix golang version bug, 增加前端展示
+    2017-11-03  fork from wklekn
+    2017-11-03  modify easymap/suggest.py to supprot middle search
 
 #### Donation
 
